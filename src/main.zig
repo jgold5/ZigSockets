@@ -1,6 +1,9 @@
 const std = @import("std");
-const server = @import("server.zig");
+const thread = std.Thread;
+const root = @import("root.zig");
 
 pub fn main() !void {
-    _ = try server.start_server();
+    const t_serve = try thread.spawn(.{}, root.start_server, .{ "127.0.0.1", 8000 });
+    //const t_client = try thread.spawn(.{}, root.connect, .{ "127.0.0.1", 8000 });
+    t_serve.join();
 }

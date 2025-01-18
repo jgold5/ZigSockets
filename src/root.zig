@@ -1,10 +1,12 @@
 const std = @import("std");
 const testing = std.testing;
+const server = @import("server.zig");
+const client = @import("client.zig");
 
-export fn add(a: i32, b: i32) i32 {
-    return a + b;
+pub fn start_server(name: []const u8, port: u16) !void {
+    try server.start_server(name, port);
 }
 
-test "basic add functionality" {
-    try testing.expect(add(3, 7) == 10);
+pub fn connect(name: []const u8, port: u16) !void {
+    try client.connect(name, port);
 }
