@@ -1,5 +1,7 @@
 const std = @import("std");
 const net = std.net;
+const gpa = std.heap.GeneralPurposeAllocator;
+const gpaConfig = std.heap.GeneralPurposeAllocatorConfig;
 
 pub fn start_server(name: []const u8, port: u16) !void {
     while (true) {
@@ -31,7 +33,9 @@ fn send_response(stream: net.Stream) void {
 }
 
 fn handle_conn(stream: net.Stream) !void {
-    const alloc = std.heap.page_allocator;
+    const default_config = gpaConfig{};
+    var initializedGpa = gpa(default_config){};
+    const alloc = initializedGpa.allocator();
     const read_buf = try alloc.alloc(u8, 1024);
     const write_buf = try alloc.alloc(u8, 1024);
     while (true) {
@@ -40,7 +44,8 @@ fn handle_conn(stream: net.Stream) !void {
             break;
         }
         const res = try std.fs.cwd().readFile("src/index.html", write_buf);
-        std.debug.print("Index: {s}\n", .{res});
+        std.debug.print("Index: {x}\n", .{res});
+        std.debug.print("Type of write_buf: {}\n", .{@TypeOf(write_buf)});
 
         const resp = "HTTP/1.1 200 OK\nContent-Type: application/json\nContent-Length: 30\n\n{\"status\":\"success\",\"data\":{}}\r\n";
         _ = try stream.write(resp);
