@@ -2,6 +2,7 @@ const std = @import("std");
 const net = std.net;
 const gpa = std.heap.GeneralPurposeAllocator;
 const gpaConfig = std.heap.GeneralPurposeAllocatorConfig;
+const arrayList = std.ArrayList;
 
 pub fn start_server(name: []const u8, port: u16) !void {
     while (true) {
@@ -38,18 +39,20 @@ fn handle_conn(stream: net.Stream) !void {
     const alloc = initializedGpa.allocator();
     const read_buf = try alloc.alloc(u8, 1024);
     const write_buf = try alloc.alloc(u8, 1024);
+    var al = arrayList(u8).init(alloc);
     while (true) {
         const bytes_read = try stream.read(read_buf);
         if (bytes_read == 0) {
             break;
         }
+        const response_header = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: ";
         const res = try std.fs.cwd().readFile("src/index.html", write_buf);
-        std.debug.print("Index: {x}\n", .{res});
-        std.debug.print("Type of write_buf: {}\n", .{@TypeOf(write_buf)});
-
-        const resp = "HTTP/1.1 200 OK\nContent-Type: application/json\nContent-Length: 30\n\n{\"status\":\"success\",\"data\":{}}\r\n";
-        _ = try stream.write(resp);
-        //_ = try stream.write(res);
+        const len_as_str = try std.fmt.allocPrint(alloc, "{d}", .{res.len});
+        _ = try al.appendSlice(response_header);
+        _ = try al.appendSlice(len_as_str);
+        _ = try al.appendSlice("\r\n\r\n");
+        _ = try al.appendSlice(res);
+        _ = try stream.write(try al.toOwnedSlice());
         std.debug.print("Read: {} bytes\n", .{bytes_read});
         std.debug.print("Read: {s}\n", .{read_buf[0..bytes_read]});
     }
