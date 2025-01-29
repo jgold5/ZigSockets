@@ -1,4 +1,5 @@
 const std = @import("std");
+const base64 = std.base64;
 const net = std.net;
 const gpa = std.heap.GeneralPurposeAllocator;
 const gpaConfig = std.heap.GeneralPurposeAllocatorConfig;
@@ -67,4 +68,14 @@ fn chop_space(req: *[]u8) ![]u8 {
     const res = req.*[0..index];
     req.* = req.*[index + 1 .. req.len];
     return res;
+}
+
+test "make_accept" {
+    const decoder = base64.Base64Decoder.init(base64.standard_alphabet_chars, '=');
+    const src = "dbH/OKmdMCxS3CaXIQYKlA==";
+    const size = try decoder.calcSizeForSlice(src);
+    const dst_buf = try alloc.alloc(u8, size);
+    defer alloc.free(dst_buf);
+    _ = try decoder.decode(dst_buf, src);
+    std.debug.print("{s}", .{dst_buf});
 }
