@@ -44,17 +44,18 @@ fn handle_conn(allocator: std.mem.Allocator, server: *net.Server) !void {
     if (bytes_read == 0) {
         return;
     }
-    var req: []u8 = read_buf[0..bytes_read];
-    std.debug.print("{s}", .{req});
-    _ = try chop_newline(&req); //request line
-    _ = try chop_newline(&req); //host
-    _ = try chop_newline(&req); //connection
-    _ = try chop_newline(&req); //upgrade
-    var key = try chop_newline(&req); //key
-    try send_response(allocator, stream, &key);
+    const req: []u8 = read_buf[0..bytes_read];
+    std.debug.print("{x}", .{req});
+    const req_line = try chop_newline(req, 0); //request line
+    const host_line = try chop_newline(req, req_line.?); //host
+    const connection_line = try chop_newline(req, host_line.?); //connection
+    const upgrade_line = try chop_newline(req, connection_line.?); //upgrade
+    const key_line = try chop_newline(req, upgrade_line.?); //key
+    std.debug.print("AHHHHHHHHHH:{s}", .{req[upgrade_line.? .. key_line.? - 1]});
+    try send_response(allocator, stream, req[upgrade_line.? .. key_line.? - 1]);
 }
 
-fn send_response(allocator: std.mem.Allocator, stream: net.Stream, key_line: *[]u8) !void {
+fn send_response(allocator: std.mem.Allocator, stream: net.Stream, key_line: []const u8) !void {
     const accept = try handle_key_line(allocator, key_line);
     defer allocator.free(accept);
     const response =
@@ -69,13 +70,12 @@ fn send_response(allocator: std.mem.Allocator, stream: net.Stream, key_line: *[]
     std.debug.print("{s}", .{resp});
 }
 
-fn handle_key_line(allocator: std.mem.Allocator, key_line: *[]u8) ![]const u8 {
-    _ = try chop_space(key_line);
-    const key = try chop_space(key_line);
-    return try compute_ws_accept(allocator, key);
+fn handle_key_line(allocator: std.mem.Allocator, key_line: []const u8) ![]const u8 {
+    const field = try chop_space(key_line, 0);
+    return try compute_ws_accept(allocator, key_line[field.?..]);
 }
 
-fn handle_req_line(req_line: *[]u8) !void {
+fn handle_req_line(req_line: []u8) !void {
     const method = try chop_space(req_line);
     const uri = try chop_space(req_line);
     const protocol = try chop_space(req_line);
@@ -83,24 +83,35 @@ fn handle_req_line(req_line: *[]u8) !void {
     _ = &r;
 }
 
-fn chop_newline(req: *[]u8) ![]u8 {
-    const index = std.mem.indexOf(u8, req.*, "\r\n") orelse return req.*;
-    const res = req.*[0..index];
-    req.* = req.*[index + 2 .. req.len];
-    return res;
+fn chop_newline(req: []const u8, from: usize) !?usize {
+    if (from > req.len) {
+        return error.OutOfBounds;
+    }
+    const ind = std.mem.indexOf(u8, req[from..], "\n");
+    if (ind != null) {
+        return from + ind.? + 1;
+    } else {
+        return null;
+    }
 }
 
-fn chop_space(req: *[]u8) ![]u8 {
-    const index = std.mem.indexOf(u8, req.*, " ") orelse return req.*;
-    const res = req.*[0..index];
-    req.* = req.*[index + 1 .. req.len];
-    return res;
+fn chop_space(req: []const u8, from: usize) !?usize {
+    if (from > req.len) {
+        return error.OutOfBounds;
+    }
+    const ind = std.mem.indexOf(u8, req[from..], " ");
+    if (ind != null) {
+        return from + ind.? + 1;
+    } else {
+        return null;
+    }
 }
 
 fn compute_ws_accept(allocator: std.mem.Allocator, key: []const u8) ![]const u8 {
     var dest_sha: [20]u8 = undefined;
     const as_slice = try std.mem.concat(allocator, u8, &[_][]const u8{ key, guid });
     sha1.hash(as_slice, &dest_sha, .{});
+    allocator.free(as_slice);
     const ac: []const u8 = &dest_sha;
     const encoder = base64.Base64Encoder.init(base64.standard_alphabet_chars, '=');
     const size = encoder.calcSize(20);
@@ -111,8 +122,7 @@ fn compute_ws_accept(allocator: std.mem.Allocator, key: []const u8) ![]const u8 
 test "cp" {
     const alloc = std.testing.allocator;
     const key = "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==";
-    var a = try std.mem.concat(alloc, u8, &[_][]const u8{ key, "" });
-    const res = try handle_key_line(alloc, &a);
+    const res = try handle_key_line(alloc, key);
     defer alloc.free(res);
     std.debug.print("{s}", .{res});
 }
