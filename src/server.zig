@@ -29,13 +29,13 @@ pub fn start_server(name: []const u8, port: u16) !void {
     defer _ = initializedGpa.deinit();
     while (true) {
         try handle_conn(alloc, &server);
-        std.debug.print("\nDisconnected\n", .{});
+        std.debug.print("DISCONNECTED\n", .{});
     }
 }
 
 fn handle_conn(allocator: std.mem.Allocator, server: *net.Server) !void {
     const conn = try server.accept();
-    std.debug.print("Connected\n", .{});
+    std.debug.print("CONNECTED\n", .{});
     const stream = conn.stream;
     defer stream.close();
     var read_buf = try allocator.alloc(u8, chunk_size);
@@ -45,15 +45,19 @@ fn handle_conn(allocator: std.mem.Allocator, server: *net.Server) !void {
         return;
     }
     const req: []u8 = read_buf[0..bytes_read];
-    std.debug.print("Req:\n{s}\n", .{req});
+    //std.debug.print("Req:\n{s}\n", .{req});
+    try send_response(allocator, stream, req);
+    _ = try stream.read(read_buf);
+    std.debug.print("Req:\n{x}\n", .{read_buf});
+}
+
+fn send_response(allocator: std.mem.Allocator, stream: net.Stream, req: []const u8) !void {
     const req_line = try chop_newline(req, 0); //request line
     const version_line = try chop_newline(req, req_line.?); //host
     const key_line = try chop_newline(req, version_line.?); //key
-    try send_response(allocator, stream, req[version_line.? .. key_line.? - 2]);
-}
-
-fn send_response(allocator: std.mem.Allocator, stream: net.Stream, key_line: []const u8) !void {
-    const accept = try handle_key_line(allocator, key_line);
+    const field_and_key = req[version_line.? .. key_line.? - 2];
+    const field = try chop_space(field_and_key, 0);
+    const accept = try compute_ws_accept(allocator, field_and_key[field.?..]);
     defer allocator.free(accept);
     const response =
         "HTTP/1.1 101 Switching Protocols\r\n" ++
@@ -65,12 +69,6 @@ fn send_response(allocator: std.mem.Allocator, stream: net.Stream, key_line: []c
     defer allocator.free(resp);
     _ = try stream.write(resp);
     std.debug.print("Resp:\n{s}\n", .{resp});
-}
-
-fn handle_key_line(allocator: std.mem.Allocator, key_line: []const u8) ![]const u8 {
-    const field = try chop_space(key_line, 0);
-    std.debug.print("Calculating for: {s}:\n", .{key_line[field.?..]});
-    return try compute_ws_accept(allocator, key_line[field.?..]);
 }
 
 fn handle_req_line(req_line: []u8) !void {
@@ -115,12 +113,4 @@ fn compute_ws_accept(allocator: std.mem.Allocator, key: []const u8) ![]const u8 
     const size = encoder.calcSize(20);
     const dst_buf = try allocator.alloc(u8, size);
     return encoder.encode(dst_buf, ac);
-}
-
-test "cp" {
-    const alloc = std.testing.allocator;
-    const key = "Sec-WebSocket-Key: wNqq4Bq6yXtfuveIu96IjQ==";
-    const res = try handle_key_line(alloc, key);
-    defer alloc.free(res);
-    std.debug.print("{s}", .{res});
 }
