@@ -45,33 +45,31 @@ fn handle_conn(allocator: std.mem.Allocator, server: *net.Server) !void {
         return;
     }
     const req: []u8 = read_buf[0..bytes_read];
-    std.debug.print("{x}", .{req});
+    std.debug.print("Req:\n{s}\n", .{req});
     const req_line = try chop_newline(req, 0); //request line
-    const host_line = try chop_newline(req, req_line.?); //host
-    const connection_line = try chop_newline(req, host_line.?); //connection
-    const upgrade_line = try chop_newline(req, connection_line.?); //upgrade
-    const key_line = try chop_newline(req, upgrade_line.?); //key
-    std.debug.print("AHHHHHHHHHH:{s}", .{req[upgrade_line.? .. key_line.? - 1]});
-    try send_response(allocator, stream, req[upgrade_line.? .. key_line.? - 1]);
+    const version_line = try chop_newline(req, req_line.?); //host
+    const key_line = try chop_newline(req, version_line.?); //key
+    try send_response(allocator, stream, req[version_line.? .. key_line.? - 2]);
 }
 
 fn send_response(allocator: std.mem.Allocator, stream: net.Stream, key_line: []const u8) !void {
     const accept = try handle_key_line(allocator, key_line);
     defer allocator.free(accept);
     const response =
-        \\HTTP/1.1 101 Switching Protocols
-        \\Upgrade: websocket
-        \\Connection: Upgrade
-        \\Sec-WebSocket-Accept: {s}
-    ;
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+        "Upgrade: websocket\r\n" ++
+        "Connection: Upgrade\r\n" ++
+        "Sec-WebSocket-Accept: {s}\r\n" ++
+        "\r\n";
     const resp = try std.fmt.allocPrint(allocator, response, .{accept});
     defer allocator.free(resp);
     _ = try stream.write(resp);
-    std.debug.print("{s}", .{resp});
+    std.debug.print("Resp:\n{s}\n", .{resp});
 }
 
 fn handle_key_line(allocator: std.mem.Allocator, key_line: []const u8) ![]const u8 {
     const field = try chop_space(key_line, 0);
+    std.debug.print("Calculating for: {s}:\n", .{key_line[field.?..]});
     return try compute_ws_accept(allocator, key_line[field.?..]);
 }
 
@@ -87,9 +85,9 @@ fn chop_newline(req: []const u8, from: usize) !?usize {
     if (from > req.len) {
         return error.OutOfBounds;
     }
-    const ind = std.mem.indexOf(u8, req[from..], "\n");
+    const ind = std.mem.indexOf(u8, req[from..], "\r\n");
     if (ind != null) {
-        return from + ind.? + 1;
+        return from + ind.? + 2;
     } else {
         return null;
     }
@@ -121,7 +119,7 @@ fn compute_ws_accept(allocator: std.mem.Allocator, key: []const u8) ![]const u8 
 
 test "cp" {
     const alloc = std.testing.allocator;
-    const key = "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==";
+    const key = "Sec-WebSocket-Key: wNqq4Bq6yXtfuveIu96IjQ==";
     const res = try handle_key_line(alloc, key);
     defer alloc.free(res);
     std.debug.print("{s}", .{res});
