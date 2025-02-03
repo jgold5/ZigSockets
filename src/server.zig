@@ -39,16 +39,18 @@ fn handle_conn(allocator: std.mem.Allocator, server: *net.Server) !void {
     const stream = conn.stream;
     defer stream.close();
     var read_buf = try allocator.alloc(u8, chunk_size);
+    var msg_buf = try allocator.alloc(u8, chunk_size);
     defer allocator.free(read_buf);
+    defer allocator.free(msg_buf);
     const bytes_read = try stream.read(read_buf);
     if (bytes_read == 0) {
         return;
     }
     const req: []u8 = read_buf[0..bytes_read];
-    //std.debug.print("Req:\n{s}\n", .{req});
+    std.debug.print("Req:\n{s}\n", .{req});
     try send_response(allocator, stream, req);
-    _ = try stream.read(read_buf);
-    std.debug.print("Req:\n{x}\n", .{read_buf});
+    const msg_b = try stream.read(msg_buf);
+    std.debug.print("Req:\n{x}\n", .{msg_buf[0..msg_b]});
 }
 
 fn send_response(allocator: std.mem.Allocator, stream: net.Stream, req: []const u8) !void {
