@@ -29,15 +29,33 @@ const Opcode = enum(u4) {
 };
 
 const Frame = struct {
-    fin: u1,
     opcode: Opcode,
-    //mask: u1,
-    //payload_len: [9]u8,
-    //mask_key: ?u32,
-    //payload: []u8,
+    mask_key: [4]u8,
+    payload: []const u8,
 
-    pub fn toBits(self: Frame) u8 {
+    pub fn init(payload: []const u8) Frame {
+        const self = Frame{
+            .payload = payload,
+            .mask_key = generate_mask_key(),
+            .opcode = Opcode.ping,
+        };
+        return self;
+    }
+
+    fn generate_mask_key() [4]u8 {
+        return [_]u8{ 0x5b, 0x61, 0xf2, 0xf8 };
+    }
+
+    pub fn gen_frame_bits(self: Frame) []u8 {
         return @as(u8, self.fin) << 7 | @as(u8, @intFromEnum(self.opcode));
+    }
+
+    pub fn mask_payload(self: Frame, alloc: std.mem.Allocator) ![]u8 {
+        var masked_payload = try alloc.alloc(u8, self.payload.len);
+        for (self.payload, 0..) |char, i| {
+            masked_payload[i] = char ^ self.mask_key[i % self.mask_key.len];
+        }
+        return masked_payload;
     }
 };
 
@@ -46,21 +64,13 @@ const mk = [_]u8{ 0x5b, 0x61, 0xf2, 0xf8 };
 const p_len = pl.len;
 const fin: u1 = 1;
 
-pub fn mask_payload(alloc: std.mem.Allocator, payload: []const u8, mask_key: [4]u8) ![]u8 {
-    var masked_payload = try alloc.alloc(u8, payload.len);
-    for (payload, 0..) |char, i| {
-        masked_payload[i] = char ^ mask_key[i % mask_key.len];
-    }
-    return masked_payload;
-}
-
 test "rand" {
-    const alloc = std.testing.allocator;
-    const masked_payload = try mask_payload(alloc, pl, mk);
-    defer alloc.free(masked_payload);
-    std.debug.print("{x}", .{masked_payload});
-    const a = Frame{ .fin = 1, .opcode = Opcode.ping };
-    std.debug.print("{x}", .{a.toBits()});
+    //const alloc = std.testing.allocator;
+    //const masked_payload = try mask_payload(alloc, pl, mk);
+    //defer alloc.free(masked_payload);
+    //std.debug.print("{x}", .{masked_payload});
+    const a = Frame.init(pl);
+    std.debug.print("{any}", .{a});
 }
 
 //{ 81, 90, 5b, 61, f2, f8, 13, 28, ba, b1, 13, 28, ba, b1, 13, 28, ba, b1, 13, 28, ba, b1 }
