@@ -116,3 +116,85 @@ fn compute_ws_accept(allocator: std.mem.Allocator, key: []const u8) ![]const u8 
     const dst_buf = try allocator.alloc(u8, size);
     return encoder.encode(dst_buf, ac);
 }
+
+const Opcode = enum(u4) {
+    cont = 0x0,
+    txt = 0x1,
+    bin = 0x2,
+    close = 0x8,
+    ping = 0x9,
+    pong = 0xa,
+};
+
+const Frame = struct {
+    fin: u8,
+    opcode: Opcode,
+    mask_key: [4]u8,
+    payload: []const u8,
+
+    pub fn init(payload: []const u8) Frame {
+        const self = Frame{
+            .fin = 1,
+            .payload = payload,
+            .mask_key = generate_mask_key(),
+            .opcode = Opcode.txt,
+        };
+        return self;
+    }
+
+    fn generate_mask_key() [4]u8 {
+        return [_]u8{ 0x5b, 0x61, 0xf2, 0xf8 };
+    }
+
+    pub fn gen_frame_bits(self: Frame, alloc: std.mem.Allocator) ![]u8 {
+        var list = std.ArrayList(u8).init(alloc);
+        defer list.deinit();
+        const payload_len: u8 = @intCast(self.payload.len);
+        try list.append(@as(u8, self.fin) << 7 | @as(u8, @intFromEnum(self.opcode)));
+        try list.append(1 << 7 | payload_len);
+        try list.appendSlice(&self.mask_key);
+        const masked_payload = try self.mask_payload(alloc);
+        defer alloc.free(masked_payload);
+        try list.appendSlice(masked_payload);
+        return list.toOwnedSlice();
+    }
+
+    pub fn mask_payload(self: Frame, alloc: std.mem.Allocator) ![]u8 {
+        var masked_payload = try alloc.alloc(u8, self.payload.len);
+        for (self.payload, 0..) |char, i| {
+            masked_payload[i] = char ^ self.mask_key[i % self.mask_key.len];
+        }
+        return masked_payload;
+    }
+};
+
+fn unmask_message(alloc: std.mem.Allocator, message: []const u8) !void {
+    const first = message[0];
+    const next = message[1];
+    const mask = message[2..6];
+    const payload = message[6..];
+    const fin = (message[0] >> 7) & 0b1});
+    const opcode = message[0] & 0b1111;
+    std.debug.print("{x}\n", .{(next >> 7) & 0b1});
+    std.debug.print("{x}\n", .{(next) & 0b1111111});
+    std.debug.print("{x}\n", .{mask});
+    std.debug.print("{x}\n", .{payload});
+    const unmasked = try unmask_payload(payload, mask, alloc);
+    defer alloc.free(unmasked);
+    std.debug.print("{s}\n", .{unmasked});
+}
+
+pub fn unmask_payload(payload: []const u8, mask_key: []const u8, alloc: std.mem.Allocator) ![]u8 {
+    var masked_payload = try alloc.alloc(u8, payload.len);
+    for (payload, 0..) |char, i| {
+        masked_payload[i] = char ^ mask_key[i % mask_key.len];
+    }
+    return masked_payload;
+}
+
+test "unmask" {
+    const alloc = std.testing.allocator;
+    const msg = [_]u8{ 0x81, 0x90, 0x5b, 0x61, 0xf2, 0xf8, 0x13, 0x28, 0xba, 0xb1, 0x13, 0x28, 0xba, 0xb1, 0x13, 0x28, 0xba, 0xb1, 0x13, 0x28, 0xba, 0xb1 };
+    const a: []const u8 = &msg;
+    try unmask_message(alloc, a);
+}
