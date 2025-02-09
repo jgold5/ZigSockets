@@ -9,6 +9,7 @@ const arrayList = std.ArrayList;
 const default_config = gpaConfig{};
 const chunk_size: usize = 1024;
 const guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+const max_wait = 1_000_000_000;
 
 const Request = struct {
     method: []u8,
@@ -39,9 +40,7 @@ fn handle_conn(allocator: std.mem.Allocator, server: *net.Server) !void {
     const stream = conn.stream;
     defer stream.close();
     var read_buf = try allocator.alloc(u8, chunk_size);
-    var msg_buf = try allocator.alloc(u8, chunk_size);
     defer allocator.free(read_buf);
-    defer allocator.free(msg_buf);
     const bytes_read = try stream.read(read_buf);
     if (bytes_read == 0) {
         return;
@@ -49,8 +48,28 @@ fn handle_conn(allocator: std.mem.Allocator, server: *net.Server) !void {
     const req: []u8 = read_buf[0..bytes_read];
     std.debug.print("Req:\n{s}\n", .{req});
     try send_response(allocator, stream, req);
-    const msg_b = try stream.read(msg_buf);
-    std.debug.print("Req:\n{x}\n", .{msg_buf[0..msg_b]});
+    var timer = try std.time.Timer.start();
+    var i: usize = 0;
+    while (true) {
+        const msg_buf = try allocator.alloc(u8, chunk_size);
+        const msg_b = try stream.read(msg_buf[i..]);
+        const curr_msg = msg_buf[i .. i + msg_b];
+        if (msg_b > 0) {
+            const opcode = get_opcode(curr_msg);
+            if (opcode == .close) {
+                std.debug.print("Closing\n", .{});
+                break;
+            } else if (opcode == .txt) {
+                try unmask_message(allocator, curr_msg);
+                i += msg_b;
+                timer.reset();
+            }
+        }
+        const curr_time = timer.read();
+        if (curr_time > max_wait) {
+            break;
+        }
+    }
 }
 
 fn send_response(allocator: std.mem.Allocator, stream: net.Stream, req: []const u8) !void {
@@ -126,75 +145,44 @@ const Opcode = enum(u4) {
     pong = 0xa,
 };
 
-const Frame = struct {
-    fin: u8,
-    opcode: Opcode,
-    mask_key: [4]u8,
-    payload: []const u8,
-
-    pub fn init(payload: []const u8) Frame {
-        const self = Frame{
-            .fin = 1,
-            .payload = payload,
-            .mask_key = generate_mask_key(),
-            .opcode = Opcode.txt,
-        };
-        return self;
-    }
-
-    fn generate_mask_key() [4]u8 {
-        return [_]u8{ 0x5b, 0x61, 0xf2, 0xf8 };
-    }
-
-    pub fn gen_frame_bits(self: Frame, alloc: std.mem.Allocator) ![]u8 {
-        var list = std.ArrayList(u8).init(alloc);
-        defer list.deinit();
-        const payload_len: u8 = @intCast(self.payload.len);
-        try list.append(@as(u8, self.fin) << 7 | @as(u8, @intFromEnum(self.opcode)));
-        try list.append(1 << 7 | payload_len);
-        try list.appendSlice(&self.mask_key);
-        const masked_payload = try self.mask_payload(alloc);
-        defer alloc.free(masked_payload);
-        try list.appendSlice(masked_payload);
-        return list.toOwnedSlice();
-    }
-
-    pub fn mask_payload(self: Frame, alloc: std.mem.Allocator) ![]u8 {
-        var masked_payload = try alloc.alloc(u8, self.payload.len);
-        for (self.payload, 0..) |char, i| {
-            masked_payload[i] = char ^ self.mask_key[i % self.mask_key.len];
-        }
-        return masked_payload;
-    }
-};
-
 fn unmask_message(alloc: std.mem.Allocator, message: []const u8) !void {
-    const first = message[0];
-    const next = message[1];
-    const mask = message[2..6];
-    const payload = message[6..];
-    const fin = (message[0] >> 7) & 0b1});
+    const payload_len = get_payload_len(message);
+    var start_mask: usize = 0;
+    if (payload_len < 126) {
+        start_mask = 2;
+    } else {
+        start_mask = 4;
+    }
+    const end_mask = start_mask + 4;
+    const mask = message[start_mask..end_mask];
+    const payload = message[end_mask..];
+    //   const fin = (message[0] >> 7) & 0b1;
     const opcode = message[0] & 0b1111;
-    std.debug.print("{x}\n", .{(next >> 7) & 0b1});
-    std.debug.print("{x}\n", .{(next) & 0b1111111});
-    std.debug.print("{x}\n", .{mask});
-    std.debug.print("{x}\n", .{payload});
-    const unmasked = try unmask_payload(payload, mask, alloc);
+    const unmasked = try unmask_payload(alloc, payload, mask);
     defer alloc.free(unmasked);
-    std.debug.print("{s}\n", .{unmasked});
+    std.debug.print("OG Message: {x}\n", .{message});
+    std.debug.print("Opcode: {x}\n", .{opcode});
+    std.debug.print("Unmasked: {s}\n", .{unmasked});
 }
 
-pub fn unmask_payload(payload: []const u8, mask_key: []const u8, alloc: std.mem.Allocator) ![]u8 {
+fn get_opcode(message: []const u8) Opcode {
+    const opcode = message[0] & 0b1111;
+    return @enumFromInt(opcode);
+}
+
+fn get_payload_len(message: []const u8) usize {
+    const len: u8 = message[1] & 0b1111111;
+    if (len < 126) {
+        return len;
+    } else {
+        return message[2] << 4 | message[3];
+    }
+}
+
+pub fn unmask_payload(alloc: std.mem.Allocator, payload: []const u8, mask_key: []const u8) ![]u8 {
     var masked_payload = try alloc.alloc(u8, payload.len);
     for (payload, 0..) |char, i| {
         masked_payload[i] = char ^ mask_key[i % mask_key.len];
     }
     return masked_payload;
-}
-
-test "unmask" {
-    const alloc = std.testing.allocator;
-    const msg = [_]u8{ 0x81, 0x90, 0x5b, 0x61, 0xf2, 0xf8, 0x13, 0x28, 0xba, 0xb1, 0x13, 0x28, 0xba, 0xb1, 0x13, 0x28, 0xba, 0xb1, 0x13, 0x28, 0xba, 0xb1 };
-    const a: []const u8 = &msg;
-    try unmask_message(alloc, a);
 }
