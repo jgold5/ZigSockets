@@ -1,6 +1,7 @@
 const std = @import("std");
 const base64 = std.base64;
 const sha1 = std.crypto.hash.Sha1;
+const linux = std.os.linux;
 const net = std.net;
 const fmt = std.fmt;
 const gpa = std.heap.GeneralPurposeAllocator;
@@ -185,4 +186,17 @@ pub fn unmask_payload(alloc: std.mem.Allocator, payload: []const u8, mask_key: [
         masked_payload[i] = char ^ mask_key[i % mask_key.len];
     }
     return masked_payload;
+}
+
+test "epoll" {
+    const addr = try net.Address.parseIp4("127.0.0.1", 8000);
+    var server = try net.Address.listen(addr, .{ .force_nonblocking = true });
+    defer server.deinit();
+    const stream = server.stream;
+    const epfd = linux.epoll_create();
+    var ev = linux.epoll_event{ .events = linux.EPOLL.IN, .data = .{ .fd = stream.handle } };
+    const reg = linux.epoll_ctl(@intCast(epfd), linux.EPOLL.CTL_ADD, stream.handle, &ev);
+    std.debug.print("Handle: {}\n", .{stream.handle});
+    std.debug.print("EPFD {}\n", .{epfd});
+    std.debug.print("EPOLL_CTL {}\n", .{reg});
 }
