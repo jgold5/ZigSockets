@@ -189,14 +189,46 @@ pub fn unmask_payload(alloc: std.mem.Allocator, payload: []const u8, mask_key: [
 }
 
 test "epoll" {
+    const alloc = std.testing.allocator;
     const addr = try net.Address.parseIp4("127.0.0.1", 8000);
     var server = try net.Address.listen(addr, .{ .force_nonblocking = true });
     defer server.deinit();
-    const stream = server.stream;
-    const epfd = linux.epoll_create();
-    var ev = linux.epoll_event{ .events = linux.EPOLL.IN, .data = .{ .fd = stream.handle } };
-    const reg = linux.epoll_ctl(@intCast(epfd), linux.EPOLL.CTL_ADD, stream.handle, &ev);
-    std.debug.print("Handle: {}\n", .{stream.handle});
+    var server_ev = linux.epoll_event{ .events = linux.EPOLL.IN, .data = .{ .fd = server.stream.handle } };
+    const epfd: i32 = @intCast(linux.epoll_create());
+    const reg = linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, server.stream.handle, &server_ev);
+    if (reg < 0) {
+        return error.Epoll_ctl_unsuccessful;
+    }
+    var events: [10]linux.epoll_event = undefined;
+    var streams: [10]net.Stream = undefined;
+    var i: usize = 0;
+    while (true) {
+        const nfds = linux.epoll_wait(epfd, &events, 10, -1);
+        if (nfds > 0) {
+            std.debug.print("NFDS {}\n", .{nfds});
+        }
+        for (events[0..nfds]) |ev| {
+            if (ev.data.fd == server.stream.handle) {
+                std.debug.print("Connecting \n", .{});
+                const conn = try server.accept();
+                const stream = conn.stream;
+                streams[i] = stream;
+                i += 1;
+                std.debug.print("Handle: {}\n", .{stream.handle});
+                var client_ev = linux.epoll_event{ .events = linux.EPOLL.IN | linux.EPOLL.ET, .data = .{ .fd = stream.handle } };
+                _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, stream.handle, &client_ev);
+            } else {
+                var read_buf = try alloc.alloc(u8, chunk_size);
+                defer alloc.free(read_buf);
+                const read = try streams[i - 1].read(read_buf);
+                std.debug.print("READ: {s}\n", .{read_buf[0..read]});
+            }
+        }
+
+        //var ev = linux.epoll_event{ .events = linux.EPOLL.IN, .data = .{ .fd = stream.handle } };
+        //_ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, stream.handle, &ev);
+        //std.debug.print("Handle: {}\n", .{stream.handle});
+    }
+    std.debug.print("Handle: {}\n", .{server.stream.handle});
     std.debug.print("EPFD {}\n", .{epfd});
-    std.debug.print("EPOLL_CTL {}\n", .{reg});
 }
