@@ -22,75 +22,115 @@ const Request = struct {
     }
 };
 
+const ConnectionState = struct {
+    stream: net.Stream,
+    read_queue: std.ArrayList([]const u8),
+    write_queue: std.ArrayList([]const u8),
+
+    pub fn init(stream: net.Stream, allocator: std.mem.Allocator) ConnectionState {
+        return ConnectionState{
+            .stream = stream,
+            .read_queue = std.ArrayList([]const u8).init(allocator),
+            .write_queue = std.ArrayList([]const u8).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *ConnectionState) void {
+        self.read_queue.deinit();
+        self.write_queue.deinit();
+        self.stream.deinit();
+    }
+
+    pub fn register(self: ConnectionState, epfd: i32) void {
+        var client_ev = linux.epoll_event{ .events = linux.EPOLL.IN | linux.EPOLL.ET, .data = .{ .fd = self.stream.handle } };
+        _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, self.stream.handle, &client_ev);
+    }
+
+    pub fn accept_handshake(self: ConnectionState, allocator: std.mem.Allocator, req: []const u8) !void {
+        const req_line = try chop_newline(req, 0); //request line
+        const version_line = try chop_newline(req, req_line.?); //host
+        const key_line = try chop_newline(req, version_line.?); //key
+        const field_and_key = req[version_line.? .. key_line.? - 2];
+        const field = try chop_space(field_and_key, 0);
+        const accept = try compute_ws_accept(allocator, field_and_key[field.?..]);
+        defer allocator.free(accept);
+        const response =
+            "HTTP/1.1 101 Switching Protocols\r\n" ++
+            "Upgrade: websocket\r\n" ++
+            "Connection: Upgrade\r\n" ++
+            "Sec-WebSocket-Accept: {s}\r\n" ++
+            "\r\n";
+        const resp = try std.fmt.allocPrint(allocator, response, .{accept});
+        defer allocator.free(resp);
+        _ = try self.stream.write(resp);
+        std.debug.print("Resp:\n{s}\n", .{resp});
+    }
+};
+
 pub fn start_server(name: []const u8, port: u16) !void {
     const addr = try net.Address.parseIp4(name, port);
-    var server = try net.Address.listen(addr, .{});
+    var server = try net.Address.listen(addr, .{ .force_nonblocking = true });
     defer server.deinit();
+    var server_ev = linux.epoll_event{ .events = linux.EPOLL.IN, .data = .{ .fd = server.stream.handle } };
+    const epfd: i32 = @intCast(linux.epoll_create());
+    const reg = linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, server.stream.handle, &server_ev);
+    if (reg < 0) {
+        return error.Epoll_ctl_unsuccessful;
+    }
     var initializedGpa = gpa(default_config){};
     const alloc = initializedGpa.allocator();
     defer _ = initializedGpa.deinit();
+    var connectionMap = std.HashMap(i32, ConnectionState).init();
+    defer connectionMap.deinit();
+    var events: [10]linux.epoll_event = undefined;
     while (true) {
-        try handle_conn(alloc, &server);
+        const nfds = linux.epoll_wait(epfd, &events, 10, -1);
+        for (events[0..nfds]) |ev| {
+            if (ev.data.fd == server.stream.handle) {
+            } else {
+                std.debug.print("Got a new event from from {}", .{ev.data.fd});
+            }
+        }
         std.debug.print("DISCONNECTED\n", .{});
     }
 }
 
-fn handle_conn(allocator: std.mem.Allocator, server: *net.Server) !void {
+//TODO: Add connection created here to hashmap of file descriptors to connection state
+fn register_connection(epfd: i32, allocator: std.mem.Allocator, server: *net.Server) !void {
     const conn = try server.accept();
     std.debug.print("CONNECTED\n", .{});
-    const stream = conn.stream;
-    defer stream.close();
-    var read_buf = try allocator.alloc(u8, chunk_size);
-    defer allocator.free(read_buf);
-    const bytes_read = try stream.read(read_buf);
-    if (bytes_read == 0) {
-        return;
-    }
-    const req: []u8 = read_buf[0..bytes_read];
-    std.debug.print("Req:\n{s}\n", .{req});
-    try send_response(allocator, stream, req);
-    var timer = try std.time.Timer.start();
-    var i: usize = 0;
-    while (true) {
-        const msg_buf = try allocator.alloc(u8, chunk_size);
-        const msg_b = try stream.read(msg_buf[i..]);
-        const curr_msg = msg_buf[i .. i + msg_b];
-        if (msg_b > 0) {
-            const opcode = get_opcode(curr_msg);
-            if (opcode == .close) {
-                std.debug.print("Closing\n", .{});
-                break;
-            } else if (opcode == .txt) {
-                try unmask_message(allocator, curr_msg);
-                i += msg_b;
-                timer.reset();
-            }
-        }
-        const curr_time = timer.read();
-        if (curr_time > max_wait) {
-            break;
-        }
-    }
-}
-
-fn send_response(allocator: std.mem.Allocator, stream: net.Stream, req: []const u8) !void {
-    const req_line = try chop_newline(req, 0); //request line
-    const version_line = try chop_newline(req, req_line.?); //host
-    const key_line = try chop_newline(req, version_line.?); //key
-    const field_and_key = req[version_line.? .. key_line.? - 2];
-    const field = try chop_space(field_and_key, 0);
-    const accept = try compute_ws_accept(allocator, field_and_key[field.?..]);
-    defer allocator.free(accept);
-    const response =
-        "HTTP/1.1 101 Switching Protocols\r\n" ++
-        "Upgrade: websocket\r\n" ++
-        "Connection: Upgrade\r\n" ++
-        "Sec-WebSocket-Accept: {s}\r\n" ++
-        "\r\n";
-    const resp = try std.fmt.allocPrint(allocator, response, .{accept});
-    defer allocator.free(resp);
-    _ = try stream.write(resp);
-    std.debug.print("Resp:\n{s}\n", .{resp});
+    var connection = ConnectionState.init(conn.stream, allocator);
+    connection.register(epfd);
+    return connection;
+    //const bytes_read = try stream.read(read_buf);
+    //if (bytes_read == 0) {
+    //    return;
+    //}
+    //const req: []u8 = read_buf[0..bytes_read];
+    //std.debug.print("Req:\n{s}\n", .{req});
+    //try send_response(allocator, stream, req);
+    //var timer = try std.time.Timer.start();
+    //var i: usize = 0;
+    //while (true) {
+    //    const msg_buf = try allocator.alloc(u8, chunk_size);
+    //    const msg_b = try stream.read(msg_buf[i..]);
+    //    const curr_msg = msg_buf[i .. i + msg_b];
+    //    if (msg_b > 0) {
+    //        const opcode = get_opcode(curr_msg);
+    //        if (opcode == .close) {
+    //            std.debug.print("Closing\n", .{});
+    //            break;
+    //        } else if (opcode == .txt) {
+    //            try unmask_message(allocator, curr_msg);
+    //            i += msg_b;
+    //            timer.reset();
+    //        }
+    //    }
+    //    const curr_time = timer.read();
+    //    if (curr_time > max_wait) {
+    //        break;
+    //    }
+    //}
 }
 
 fn handle_req_line(req_line: []u8) !void {
