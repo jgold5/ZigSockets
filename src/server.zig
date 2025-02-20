@@ -80,35 +80,40 @@ pub fn start_server(name: []const u8, port: u16) !void {
     var initializedGpa = gpa(default_config){};
     const alloc = initializedGpa.allocator();
     defer _ = initializedGpa.deinit();
-    var connectionMap = std.HashMap(i32, ConnectionState).init();
+    var connectionMap = std.AutoHashMap(i32, ConnectionState).init(alloc);
     defer connectionMap.deinit();
     var events: [10]linux.epoll_event = undefined;
     while (true) {
         const nfds = linux.epoll_wait(epfd, &events, 10, -1);
         for (events[0..nfds]) |ev| {
             if (ev.data.fd == server.stream.handle) {
+                try register_connection(&connectionMap, epfd, alloc, &server);
             } else {
-                std.debug.print("Got a new event from from {}", .{ev.data.fd});
+                var curr_conn = connectionMap.get(ev.data.fd).?;
+                try read_connection(&curr_conn, alloc);
             }
         }
         std.debug.print("DISCONNECTED\n", .{});
     }
 }
 
-//TODO: Add connection created here to hashmap of file descriptors to connection state
-fn register_connection(epfd: i32, allocator: std.mem.Allocator, server: *net.Server) !void {
+fn register_connection(map: *std.AutoHashMap(i32, ConnectionState), epfd: i32, allocator: std.mem.Allocator, server: *net.Server) !void {
     const conn = try server.accept();
     std.debug.print("CONNECTED\n", .{});
     var connection = ConnectionState.init(conn.stream, allocator);
     connection.register(epfd);
-    return connection;
-    //const bytes_read = try stream.read(read_buf);
-    //if (bytes_read == 0) {
-    //    return;
-    //}
-    //const req: []u8 = read_buf[0..bytes_read];
-    //std.debug.print("Req:\n{s}\n", .{req});
-    //try send_response(allocator, stream, req);
+    try map.put(conn.stream.handle, connection);
+}
+
+fn read_connection(connection: *ConnectionState, allocator: std.mem.Allocator) !void {
+    const read_buf = try allocator.alloc(u8, chunk_size);
+    const bytes_read = try connection.stream.read(read_buf);
+    if (bytes_read == 0) {
+        return;
+    }
+    const req: []u8 = read_buf[0..bytes_read];
+    std.debug.print("Req:\n{s}\n", .{req});
+    //try send_response(allocator, connection.stream, req);
     //var timer = try std.time.Timer.start();
     //var i: usize = 0;
     //while (true) {
