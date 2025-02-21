@@ -26,12 +26,14 @@ const ConnectionState = struct {
     stream: net.Stream,
     read_queue: std.ArrayList([]const u8),
     write_queue: std.ArrayList([]const u8),
+    connected: bool,
 
     pub fn init(stream: net.Stream, allocator: std.mem.Allocator) ConnectionState {
         return ConnectionState{
             .stream = stream,
             .read_queue = std.ArrayList([]const u8).init(allocator),
             .write_queue = std.ArrayList([]const u8).init(allocator),
+            .connected = false,
         };
     }
 
@@ -46,24 +48,12 @@ const ConnectionState = struct {
         _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, self.stream.handle, &client_ev);
     }
 
-    pub fn accept_handshake(self: ConnectionState, allocator: std.mem.Allocator, req: []const u8) !void {
-        const req_line = try chop_newline(req, 0); //request line
-        const version_line = try chop_newline(req, req_line.?); //host
-        const key_line = try chop_newline(req, version_line.?); //key
-        const field_and_key = req[version_line.? .. key_line.? - 2];
-        const field = try chop_space(field_and_key, 0);
-        const accept = try compute_ws_accept(allocator, field_and_key[field.?..]);
-        defer allocator.free(accept);
-        const response =
-            "HTTP/1.1 101 Switching Protocols\r\n" ++
-            "Upgrade: websocket\r\n" ++
-            "Connection: Upgrade\r\n" ++
-            "Sec-WebSocket-Accept: {s}\r\n" ++
-            "\r\n";
-        const resp = try std.fmt.allocPrint(allocator, response, .{accept});
-        defer allocator.free(resp);
-        _ = try self.stream.write(resp);
-        std.debug.print("Resp:\n{s}\n", .{resp});
+    pub fn getConnected(self: ConnectionState) bool {
+        return self.connected;
+    }
+
+    pub fn setConnected(self: *ConnectionState, state: bool) void {
+        self.connected = state;
     }
 };
 
@@ -80,8 +70,7 @@ pub fn start_server(name: []const u8, port: u16) !void {
     var initializedGpa = gpa(default_config){};
     const alloc = initializedGpa.allocator();
     defer _ = initializedGpa.deinit();
-    var connectionMap = std.AutoHashMap(i32, ConnectionState).init(alloc);
-    defer connectionMap.deinit();
+    var connectionMap = std.AutoHashMap(i32, *ConnectionState).init(alloc);
     var events: [10]linux.epoll_event = undefined;
     while (true) {
         const nfds = linux.epoll_wait(epfd, &events, 10, -1);
@@ -89,31 +78,43 @@ pub fn start_server(name: []const u8, port: u16) !void {
             if (ev.data.fd == server.stream.handle) {
                 try register_connection(&connectionMap, epfd, alloc, &server);
             } else {
-                var curr_conn = connectionMap.get(ev.data.fd).?;
-                try read_connection(&curr_conn, alloc);
+                std.debug.print("FD {any}\n", .{ev.data.fd});
+                const curr_conn = connectionMap.get(ev.data.fd).?;
+                std.debug.print("Conn {any}\n", .{curr_conn.*.stream.handle});
+                if (!curr_conn.getConnected()) {
+                    try read_connection(curr_conn, alloc);
+                } else {
+                    std.debug.print("TODO\n", .{});
+                }
             }
         }
         std.debug.print("DISCONNECTED\n", .{});
     }
+    connectionMap.deinit();
 }
 
-fn register_connection(map: *std.AutoHashMap(i32, ConnectionState), epfd: i32, allocator: std.mem.Allocator, server: *net.Server) !void {
+fn register_connection(map: *std.AutoHashMap(i32, *ConnectionState), epfd: i32, allocator: std.mem.Allocator, server: *net.Server) !void {
     const conn = try server.accept();
     std.debug.print("CONNECTED\n", .{});
-    var connection = ConnectionState.init(conn.stream, allocator);
+    var connection = try allocator.create(ConnectionState);
+    connection.* = ConnectionState.init(conn.stream, allocator);
     connection.register(epfd);
     try map.put(conn.stream.handle, connection);
 }
 
 fn read_connection(connection: *ConnectionState, allocator: std.mem.Allocator) !void {
+    std.debug.print("Conn 2 {any}\n", .{connection.stream});
     const read_buf = try allocator.alloc(u8, chunk_size);
+    defer allocator.free(read_buf);
     const bytes_read = try connection.stream.read(read_buf);
     if (bytes_read == 0) {
         return;
     }
     const req: []u8 = read_buf[0..bytes_read];
     std.debug.print("Req:\n{s}\n", .{req});
-    //try send_response(allocator, connection.stream, req);
+    try send_response(allocator, connection.stream, req);
+    connection.setConnected(true);
+    //std.debug.print("Connected {}\n", .{connection.getConnected()});
     //var timer = try std.time.Timer.start();
     //var i: usize = 0;
     //while (true) {
@@ -136,6 +137,26 @@ fn read_connection(connection: *ConnectionState, allocator: std.mem.Allocator) !
     //        break;
     //    }
     //}
+}
+
+fn send_response(allocator: std.mem.Allocator, stream: net.Stream, req: []const u8) !void {
+    const req_line = try chop_newline(req, 0); //request line
+    const version_line = try chop_newline(req, req_line.?); //host
+    const key_line = try chop_newline(req, version_line.?); //key
+    const field_and_key = req[version_line.? .. key_line.? - 2];
+    const field = try chop_space(field_and_key, 0);
+    const accept = try compute_ws_accept(allocator, field_and_key[field.?..]);
+    defer allocator.free(accept);
+    const response =
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+        "Upgrade: websocket\r\n" ++
+        "Connection: Upgrade\r\n" ++
+        "Sec-WebSocket-Accept: {s}\r\n" ++
+        "\r\n";
+    const resp = try std.fmt.allocPrint(allocator, response, .{accept});
+    defer allocator.free(resp);
+    _ = try stream.write(resp);
+    std.debug.print("Resp:\n{s}\n", .{resp});
 }
 
 fn handle_req_line(req_line: []u8) !void {
