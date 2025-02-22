@@ -11,10 +11,11 @@ function sleepSync(ms) {
 
 socket.on('open', function() {
     console.log('WebSocket connection established');
+    sleepSync(1500);
     socket.send('hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh');
-    sleepSync(500);
+    sleepSync(2500);
     socket.send('howdy');
-    sleepSync(500);
+    sleepSync(1000);
     socket.send('wazz good g');
 });
 
