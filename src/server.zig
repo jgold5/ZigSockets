@@ -40,7 +40,7 @@ const ConnectionState = struct {
     pub fn deinit(self: *ConnectionState) void {
         self.read_queue.deinit();
         self.write_queue.deinit();
-        self.stream.deinit();
+        self.stream.close();
     }
 
     pub fn register(self: ConnectionState, epfd: i32) void {
@@ -78,13 +78,11 @@ pub fn start_server(name: []const u8, port: u16) !void {
             if (ev.data.fd == server.stream.handle) {
                 try register_connection(&connectionMap, epfd, alloc, &server);
             } else {
-                std.debug.print("FD {any}\n", .{ev.data.fd});
                 const curr_conn = connectionMap.get(ev.data.fd).?;
-                std.debug.print("Conn {any}\n", .{curr_conn.*.stream.handle});
                 if (!curr_conn.getConnected()) {
-                    try read_connection(curr_conn, alloc);
+                    try read_connection(&connectionMap, ev.data.fd, alloc);
                 } else {
-                    std.debug.print("TODO\n", .{});
+                    try manage_connection(&connectionMap, ev.data.fd, alloc);
                 }
             }
         }
@@ -102,8 +100,14 @@ fn register_connection(map: *std.AutoHashMap(i32, *ConnectionState), epfd: i32, 
     try map.put(conn.stream.handle, connection);
 }
 
-fn read_connection(connection: *ConnectionState, allocator: std.mem.Allocator) !void {
-    std.debug.print("Conn 2 {any}\n", .{connection.stream});
+fn close_connection(map: *std.AutoHashMap(i32, *ConnectionState), connection_fd: i32) !void {
+    var connection = map.get(connection_fd).?;
+    connection.deinit();
+    _ = map.remove(connection_fd);
+}
+
+fn read_connection(map: *std.AutoHashMap(i32, *ConnectionState), connection_fd: i32, allocator: std.mem.Allocator) !void {
+    var connection = map.get(connection_fd).?;
     const read_buf = try allocator.alloc(u8, chunk_size);
     defer allocator.free(read_buf);
     const bytes_read = try connection.stream.read(read_buf);
@@ -114,29 +118,33 @@ fn read_connection(connection: *ConnectionState, allocator: std.mem.Allocator) !
     std.debug.print("Req:\n{s}\n", .{req});
     try send_response(allocator, connection.stream, req);
     connection.setConnected(true);
-    //std.debug.print("Connected {}\n", .{connection.getConnected()});
-    //var timer = try std.time.Timer.start();
-    //var i: usize = 0;
-    //while (true) {
-    //    const msg_buf = try allocator.alloc(u8, chunk_size);
-    //    const msg_b = try stream.read(msg_buf[i..]);
-    //    const curr_msg = msg_buf[i .. i + msg_b];
-    //    if (msg_b > 0) {
-    //        const opcode = get_opcode(curr_msg);
-    //        if (opcode == .close) {
-    //            std.debug.print("Closing\n", .{});
-    //            break;
-    //        } else if (opcode == .txt) {
-    //            try unmask_message(allocator, curr_msg);
-    //            i += msg_b;
-    //            timer.reset();
-    //        }
-    //    }
-    //    const curr_time = timer.read();
-    //    if (curr_time > max_wait) {
-    //        break;
-    //    }
-    //}
+}
+
+fn manage_connection(map: *std.AutoHashMap(i32, *ConnectionState), connection_fd: i32, allocator: std.mem.Allocator) !void {
+    var timer = try std.time.Timer.start();
+    var i: usize = 0;
+    var connection = map.get(connection_fd).?;
+    while (true) {
+        const msg_buf = try allocator.alloc(u8, chunk_size);
+        const msg_b = try connection.stream.read(msg_buf[i..]);
+        const curr_msg = msg_buf[i .. i + msg_b];
+        if (msg_b > 0) {
+            const opcode = get_opcode(curr_msg);
+            if (opcode == .close) {
+                std.debug.print("Closing\n", .{});
+                break;
+            } else if (opcode == .txt) {
+                try unmask_message(allocator, curr_msg);
+                i += msg_b;
+                timer.reset();
+            }
+        }
+        const curr_time = timer.read();
+        if (curr_time > max_wait) {
+            try close_connection(map, connection_fd);
+            break;
+        }
+    }
 }
 
 fn send_response(allocator: std.mem.Allocator, stream: net.Stream, req: []const u8) !void {
