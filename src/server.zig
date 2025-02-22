@@ -8,38 +8,28 @@ const gpa = std.heap.GeneralPurposeAllocator;
 const gpaConfig = std.heap.GeneralPurposeAllocatorConfig;
 const arrayList = std.ArrayList;
 const default_config = gpaConfig{};
-const chunk_size: usize = 1024;
-const guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-const max_wait = 1_000_000_000;
-
-const Request = struct {
-    method: []u8,
-    uri: []u8,
-    protocol: []u8,
-
-    pub fn print_uri(self: Request) void {
-        std.debug.print("uri: {s}\n", .{self.uri});
-    }
-};
+const CHUNK_SIZE: usize = 1024;
+const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+const MAX_WAIT = 1_000_000_000;
 
 const ConnectionState = struct {
     stream: net.Stream,
-    read_queue: std.ArrayList([]const u8),
-    write_queue: std.ArrayList([]const u8),
+    readQueue: std.ArrayList([]const u8),
+    writeQueue: std.ArrayList([]const u8),
     connected: bool,
 
     pub fn init(stream: net.Stream, allocator: std.mem.Allocator) ConnectionState {
         return ConnectionState{
             .stream = stream,
-            .read_queue = std.ArrayList([]const u8).init(allocator),
-            .write_queue = std.ArrayList([]const u8).init(allocator),
+            .readQueue = std.ArrayList([]const u8).init(allocator),
+            .writeQueue = std.ArrayList([]const u8).init(allocator),
             .connected = false,
         };
     }
 
     pub fn deinit(self: *ConnectionState) void {
-        self.read_queue.deinit();
-        self.write_queue.deinit();
+        self.readQueue.deinit();
+        self.writeQueue.deinit();
         self.stream.close();
     }
 
@@ -57,7 +47,7 @@ const ConnectionState = struct {
     }
 };
 
-pub fn start_server(name: []const u8, port: u16) !void {
+pub fn startServer(name: []const u8, port: u16) !void {
     const addr = try net.Address.parseIp4(name, port);
     var server = try net.Address.listen(addr, .{ .force_nonblocking = true });
     defer server.deinit();
@@ -76,22 +66,21 @@ pub fn start_server(name: []const u8, port: u16) !void {
         const nfds = linux.epoll_wait(epfd, &events, 10, -1);
         for (events[0..nfds]) |ev| {
             if (ev.data.fd == server.stream.handle) {
-                try register_connection(&connectionMap, epfd, alloc, &server);
+                try registerConnection(&connectionMap, epfd, alloc, &server);
             } else {
                 const curr_conn = connectionMap.get(ev.data.fd).?;
                 if (!curr_conn.getConnected()) {
-                    try read_connection(&connectionMap, ev.data.fd, alloc);
+                    try acceptHandshake(&connectionMap, ev.data.fd, alloc);
                 } else {
-                    try manage_connection(&connectionMap, ev.data.fd, alloc);
+                    try manageConnection(&connectionMap, ev.data.fd, alloc);
                 }
             }
         }
-        std.debug.print("DISCONNECTED\n", .{});
     }
     connectionMap.deinit();
 }
 
-fn register_connection(map: *std.AutoHashMap(i32, *ConnectionState), epfd: i32, allocator: std.mem.Allocator, server: *net.Server) !void {
+fn registerConnection(map: *std.AutoHashMap(i32, *ConnectionState), epfd: i32, allocator: std.mem.Allocator, server: *net.Server) !void {
     const conn = try server.accept();
     std.debug.print("CONNECTED\n", .{});
     var connection = try allocator.create(ConnectionState);
@@ -100,15 +89,15 @@ fn register_connection(map: *std.AutoHashMap(i32, *ConnectionState), epfd: i32, 
     try map.put(conn.stream.handle, connection);
 }
 
-fn close_connection(map: *std.AutoHashMap(i32, *ConnectionState), connection_fd: i32) !void {
+fn closeConnection(map: *std.AutoHashMap(i32, *ConnectionState), connection_fd: i32) !void {
     var connection = map.get(connection_fd).?;
     connection.deinit();
     _ = map.remove(connection_fd);
 }
 
-fn read_connection(map: *std.AutoHashMap(i32, *ConnectionState), connection_fd: i32, allocator: std.mem.Allocator) !void {
+fn acceptHandshake(map: *std.AutoHashMap(i32, *ConnectionState), connection_fd: i32, allocator: std.mem.Allocator) !void {
     var connection = map.get(connection_fd).?;
-    const read_buf = try allocator.alloc(u8, chunk_size);
+    const read_buf = try allocator.alloc(u8, CHUNK_SIZE);
     defer allocator.free(read_buf);
     const bytes_read = try connection.stream.read(read_buf);
     if (bytes_read == 0) {
@@ -116,44 +105,33 @@ fn read_connection(map: *std.AutoHashMap(i32, *ConnectionState), connection_fd: 
     }
     const req: []u8 = read_buf[0..bytes_read];
     std.debug.print("Req:\n{s}\n", .{req});
-    try send_response(allocator, connection.stream, req);
+    try sendResponse(allocator, connection.stream, req);
     connection.setConnected(true);
 }
 
-fn manage_connection(map: *std.AutoHashMap(i32, *ConnectionState), connection_fd: i32, allocator: std.mem.Allocator) !void {
-    var timer = try std.time.Timer.start();
+fn manageConnection(map: *std.AutoHashMap(i32, *ConnectionState), connection_fd: i32, allocator: std.mem.Allocator) !void {
     var i: usize = 0;
     var connection = map.get(connection_fd).?;
-    while (true) {
-        const msg_buf = try allocator.alloc(u8, chunk_size);
-        const msg_b = try connection.stream.read(msg_buf[i..]);
-        const curr_msg = msg_buf[i .. i + msg_b];
-        if (msg_b > 0) {
-            const opcode = get_opcode(curr_msg);
-            if (opcode == .close) {
-                std.debug.print("Closing\n", .{});
-                break;
-            } else if (opcode == .txt) {
-                try unmask_message(allocator, curr_msg);
-                i += msg_b;
-                timer.reset();
-            }
-        }
-        const curr_time = timer.read();
-        if (curr_time > max_wait) {
-            try close_connection(map, connection_fd);
-            break;
-        }
+    const msg_buf = try allocator.alloc(u8, CHUNK_SIZE);
+    const msg_b = try connection.stream.read(msg_buf[i..]);
+    const curr_msg = msg_buf[i .. i + msg_b];
+    const opcode = getOpcode(curr_msg);
+    if (opcode == .close) {
+        std.debug.print("Closing\n", .{});
+        try closeConnection(map, connection_fd);
+    } else if (opcode == .txt) {
+        try unmaskMessage(allocator, curr_msg);
+        i += msg_b;
     }
 }
 
-fn send_response(allocator: std.mem.Allocator, stream: net.Stream, req: []const u8) !void {
-    const req_line = try chop_newline(req, 0); //request line
-    const version_line = try chop_newline(req, req_line.?); //host
-    const key_line = try chop_newline(req, version_line.?); //key
+fn sendResponse(allocator: std.mem.Allocator, stream: net.Stream, req: []const u8) !void {
+    const req_line = try chopNewline(req, 0); //request line
+    const version_line = try chopNewline(req, req_line.?); //host
+    const key_line = try chopNewline(req, version_line.?); //key
     const field_and_key = req[version_line.? .. key_line.? - 2];
-    const field = try chop_space(field_and_key, 0);
-    const accept = try compute_ws_accept(allocator, field_and_key[field.?..]);
+    const field = try chopSpace(field_and_key, 0);
+    const accept = try computeWSAccept(allocator, field_and_key[field.?..]);
     defer allocator.free(accept);
     const response =
         "HTTP/1.1 101 Switching Protocols\r\n" ++
@@ -167,15 +145,7 @@ fn send_response(allocator: std.mem.Allocator, stream: net.Stream, req: []const 
     std.debug.print("Resp:\n{s}\n", .{resp});
 }
 
-fn handle_req_line(req_line: []u8) !void {
-    const method = try chop_space(req_line);
-    const uri = try chop_space(req_line);
-    const protocol = try chop_space(req_line);
-    const r: Request = Request{ .method = method, .uri = uri, .protocol = protocol };
-    _ = &r;
-}
-
-fn chop_newline(req: []const u8, from: usize) !?usize {
+fn chopNewline(req: []const u8, from: usize) !?usize {
     if (from > req.len) {
         return error.OutOfBounds;
     }
@@ -187,7 +157,7 @@ fn chop_newline(req: []const u8, from: usize) !?usize {
     }
 }
 
-fn chop_space(req: []const u8, from: usize) !?usize {
+fn chopSpace(req: []const u8, from: usize) !?usize {
     if (from > req.len) {
         return error.OutOfBounds;
     }
@@ -199,9 +169,9 @@ fn chop_space(req: []const u8, from: usize) !?usize {
     }
 }
 
-fn compute_ws_accept(allocator: std.mem.Allocator, key: []const u8) ![]const u8 {
+fn computeWSAccept(allocator: std.mem.Allocator, key: []const u8) ![]const u8 {
     var dest_sha: [20]u8 = undefined;
-    const as_slice = try std.mem.concat(allocator, u8, &[_][]const u8{ key, guid });
+    const as_slice = try std.mem.concat(allocator, u8, &[_][]const u8{ key, GUID });
     sha1.hash(as_slice, &dest_sha, .{});
     allocator.free(as_slice);
     const ac: []const u8 = &dest_sha;
@@ -220,8 +190,8 @@ const Opcode = enum(u4) {
     pong = 0xa,
 };
 
-fn unmask_message(alloc: std.mem.Allocator, message: []const u8) !void {
-    const payload_len = get_payload_len(message);
+fn unmaskMessage(alloc: std.mem.Allocator, message: []const u8) !void {
+    const payload_len = getPayloadLen(message);
     var start_mask: usize = 0;
     if (payload_len < 126) {
         start_mask = 2;
@@ -231,21 +201,20 @@ fn unmask_message(alloc: std.mem.Allocator, message: []const u8) !void {
     const end_mask = start_mask + 4;
     const mask = message[start_mask..end_mask];
     const payload = message[end_mask..];
-    //   const fin = (message[0] >> 7) & 0b1;
     const opcode = message[0] & 0b1111;
-    const unmasked = try unmask_payload(alloc, payload, mask);
+    const unmasked = try unmaskPayload(alloc, payload, mask);
     defer alloc.free(unmasked);
     std.debug.print("OG Message: {x}\n", .{message});
     std.debug.print("Opcode: {x}\n", .{opcode});
     std.debug.print("Unmasked: {s}\n", .{unmasked});
 }
 
-fn get_opcode(message: []const u8) Opcode {
+fn getOpcode(message: []const u8) Opcode {
     const opcode = message[0] & 0b1111;
     return @enumFromInt(opcode);
 }
 
-fn get_payload_len(message: []const u8) usize {
+fn getPayloadLen(message: []const u8) usize {
     const len: u8 = message[1] & 0b1111111;
     if (len < 126) {
         return len;
@@ -254,55 +223,10 @@ fn get_payload_len(message: []const u8) usize {
     }
 }
 
-pub fn unmask_payload(alloc: std.mem.Allocator, payload: []const u8, mask_key: []const u8) ![]u8 {
+pub fn unmaskPayload(alloc: std.mem.Allocator, payload: []const u8, mask_key: []const u8) ![]u8 {
     var masked_payload = try alloc.alloc(u8, payload.len);
     for (payload, 0..) |char, i| {
         masked_payload[i] = char ^ mask_key[i % mask_key.len];
     }
     return masked_payload;
-}
-
-test "epoll" {
-    const alloc = std.testing.allocator;
-    const addr = try net.Address.parseIp4("127.0.0.1", 8000);
-    var server = try net.Address.listen(addr, .{ .force_nonblocking = true });
-    defer server.deinit();
-    var server_ev = linux.epoll_event{ .events = linux.EPOLL.IN, .data = .{ .fd = server.stream.handle } };
-    const epfd: i32 = @intCast(linux.epoll_create());
-    const reg = linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, server.stream.handle, &server_ev);
-    if (reg < 0) {
-        return error.Epoll_ctl_unsuccessful;
-    }
-    var events: [10]linux.epoll_event = undefined;
-    var streams: [10]net.Stream = undefined;
-    var i: usize = 0;
-    while (true) {
-        const nfds = linux.epoll_wait(epfd, &events, 10, -1);
-        if (nfds > 0) {
-            std.debug.print("NFDS {}\n", .{nfds});
-        }
-        for (events[0..nfds]) |ev| {
-            if (ev.data.fd == server.stream.handle) {
-                std.debug.print("Connecting \n", .{});
-                const conn = try server.accept();
-                const stream = conn.stream;
-                streams[i] = stream;
-                i += 1;
-                std.debug.print("Handle: {}\n", .{stream.handle});
-                var client_ev = linux.epoll_event{ .events = linux.EPOLL.IN | linux.EPOLL.ET, .data = .{ .fd = stream.handle } };
-                _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, stream.handle, &client_ev);
-            } else {
-                var read_buf = try alloc.alloc(u8, chunk_size);
-                defer alloc.free(read_buf);
-                const read = try streams[i - 1].read(read_buf);
-                std.debug.print("READ: {s}\n", .{read_buf[0..read]});
-            }
-        }
-
-        //var ev = linux.epoll_event{ .events = linux.EPOLL.IN, .data = .{ .fd = stream.handle } };
-        //_ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, stream.handle, &ev);
-        //std.debug.print("Handle: {}\n", .{stream.handle});
-    }
-    std.debug.print("Handle: {}\n", .{server.stream.handle});
-    std.debug.print("EPFD {}\n", .{epfd});
 }
