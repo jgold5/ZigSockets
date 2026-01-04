@@ -1,0 +1,89 @@
+<html>
+  <head><title>ZigSockets</title></head>
+  <body>
+  <time datetime="2026-01-04">2026-01-04</time>
+    <h1>Zig WebSockets (Old Project)</h1>
+<p>A small Zig project where I built an HTTP upgrade handshake + a basic WebSocket server/client to learn low-level networking.</p>
+<h2>Goals</h2>
+<ul>
+<li>Learn socket IO + event loops</li>
+<li>Implement HTTP <code>Upgrade: websocket</code></li>
+<li>Handle multiple clients (epoll)</li>
+<li>Keep code simple + inspectable</li>
+</ul>
+<h2>What I built</h2>
+<ul>
+<li><strong>Server</strong><ul>
+<li>TCP listener</li>
+<li>HTTP request parse (enough for headers)</li>
+<li>WebSocket upgrade response (101 Switching Protocols)</li>
+<li>Frame read/write (text frames)</li>
+</ul>
+</li>
+<li><strong>Client</strong><ul>
+<li>Connect + send upgrade request</li>
+<li>Read upgrade response</li>
+<li>Send a text frame, read echo</li>
+</ul>
+</li>
+</ul>
+<h2>Architecture</h2>
+<ul>
+<li><code>server.zig</code>: listener + accept loop, per-conn state machine</li>
+<li><code>main.zig</code>: wiring / runnable entrypoints for tests</li>
+<li><code>ws/</code>: handshake + frame codec helpers</li>
+</ul>
+<h2>Handshake notes</h2>
+<ul>
+<li>Parse headers, especially:<ul>
+<li><code>Sec-WebSocket-Key</code></li>
+<li><code>Sec-WebSocket-Version</code></li>
+</ul>
+</li>
+<li>Compute:<ul>
+<li><code>Sec-WebSocket-Accept = base64(sha1(key ++ magic_guid))</code></li>
+</ul>
+</li>
+<li>Reply with <code>101</code> + required headers.</li>
+</ul>
+<h2>Frame codec notes</h2>
+<ul>
+<li>Parse header bits:<ul>
+<li>FIN, opcode</li>
+<li>MASK, payload_len (7/16/64)</li>
+</ul>
+</li>
+<li>Client-&gt;server frames are masked (xor with mask key).</li>
+<li>Implement minimal opcodes:<ul>
+<li><code>0x1</code> text</li>
+<li><code>0x8</code> close</li>
+<li><code>0x9</code> ping / <code>0xA</code> pong (optional)</li>
+</ul>
+</li>
+</ul>
+<h2>Epoll / concurrency</h2>
+<ul>
+<li>Single-threaded event loop with epoll</li>
+<li>Per-connection buffers:<ul>
+<li>read buffer</li>
+<li>write buffer / pending sends</li>
+</ul>
+</li>
+<li>Treat parsing as incremental (don’t assume full frame arrives at once)</li>
+</ul>
+<h2>Testing checklist</h2>
+<ul>
+<li>Browser connects + sends a message</li>
+<li>Multiple clients can connect</li>
+<li>Ping/pong doesn’t kill connection</li>
+<li>Close frame shuts down cleanly</li>
+<li>Partial reads: headers split across recv calls</li>
+<li>Large payloads (len 126/127 paths)</li>
+</ul>
+<h2>Links</h2>
+<ul>
+<li>RFC 6455 (WebSocket protocol)</li>
+</ul>
+
+  </body>
+</html>
